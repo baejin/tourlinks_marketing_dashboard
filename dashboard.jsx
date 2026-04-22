@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { supabase } from "./src/lib/supabaseClient";
 
 /* ══════════════════════════════════════════════════════════════
    HELPERS
@@ -562,10 +563,77 @@ function NewMonthModal({ data, onClose, onCreate }) {
   );
 }
 
+function AuthScreen() {
+  const [mode, setMode] = useState("signin");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  const submit = async e => {
+    e.preventDefault();
+    setBusy(true);
+    setMessage("");
+    setError("");
+
+    const credentials = { email: email.trim(), password };
+    const result = mode === "signin"
+      ? await supabase.auth.signInWithPassword(credentials)
+      : await supabase.auth.signUp(credentials);
+
+    setBusy(false);
+    if (result.error) {
+      setError(result.error.message);
+      return;
+    }
+    if (mode === "signup" && !result.data.session) {
+      setMessage("가입 확인 메일을 확인한 뒤 로그인해주세요.");
+    }
+  };
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#f3f4f6", display: "grid", placeItems: "center", padding: 20, fontFamily: "'Pretendard','Apple SD Gothic Neo',-apple-system,sans-serif", color: "#1a1a1a" }}>
+      <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+      <form onSubmit={submit} style={{ width: "100%", maxWidth: 360, background: "#fff", border: "1px solid #e5e7eb", borderRadius: 10, padding: 22, boxShadow: "0 10px 30px rgba(15,23,42,0.06)" }}>
+        <div style={{ marginBottom: 18 }}>
+          <div style={{ fontSize: 18, fontWeight: 800, color: "#111", fontFamily: "'Outfit',sans-serif", marginBottom: 4 }}>Tourlinks</div>
+          <div style={{ fontSize: 12, color: "#777" }}>{mode === "signin" ? "대시보드에 로그인" : "새 계정 만들기"}</div>
+        </div>
+        <div style={{ display: "flex", gap: 1, background: "#f3f4f6", borderRadius: 6, padding: 2, marginBottom: 14 }}>
+          {[{ k: "signin", lb: "로그인" }, { k: "signup", lb: "회원가입" }].map(t => (
+            <button key={t.k} type="button" onClick={() => { setMode(t.k); setError(""); setMessage(""); }} style={{ flex: 1, padding: "7px 10px", fontSize: 12, border: "none", borderRadius: 4, cursor: "pointer", background: mode === t.k ? "#fff" : "transparent", color: mode === t.k ? "#111" : "#999", fontWeight: mode === t.k ? 700 : 500, boxShadow: mode === t.k ? "0 1px 2px rgba(0,0,0,0.06)" : "none" }}>{t.lb}</button>
+          ))}
+        </div>
+        <label style={{ fontSize: 10, color: "#888", display: "block", marginBottom: 3 }}>아이디(이메일)</label>
+        <input value={email} onChange={e => setEmail(e.target.value)} type="email" autoComplete="email" required style={{ ...S.input, marginBottom: 10 }} placeholder="name@example.com" />
+        <label style={{ fontSize: 10, color: "#888", display: "block", marginBottom: 3 }}>비밀번호</label>
+        <input value={password} onChange={e => setPassword(e.target.value)} type="password" autoComplete={mode === "signin" ? "current-password" : "new-password"} required minLength={6} style={{ ...S.input, marginBottom: 12 }} placeholder="6자 이상" />
+        {error && <div style={{ fontSize: 11, color: "#dc2626", background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 6, padding: "8px 10px", marginBottom: 10 }}>{error}</div>}
+        {message && <div style={{ fontSize: 11, color: "#166534", background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: 6, padding: "8px 10px", marginBottom: 10 }}>{message}</div>}
+        <button type="submit" disabled={busy} style={{ ...S.btn, ...S.btnPrimary, width: "100%", padding: "9px 12px", fontSize: 12, opacity: busy ? 0.65 : 1 }}>{busy ? "처리 중..." : mode === "signin" ? "로그인" : "회원가입"}</button>
+      </form>
+    </div>
+  );
+}
+
+function LoadingScreen({ label = "불러오는 중..." }) {
+  return (
+    <div style={{ minHeight: "100vh", background: "#f3f4f6", display: "grid", placeItems: "center", fontFamily: "'Pretendard','Apple SD Gothic Neo',-apple-system,sans-serif", color: "#666", fontSize: 13 }}>
+      {label}
+    </div>
+  );
+}
+
 /* ══════════════════════════════════════════════════════════════
    MAIN APP
    ══════════════════════════════════════════════════════════════ */
 export default function App() {
+  const [session, setSession] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [remoteReady, setRemoteReady] = useState(false);
+  const [saveState, setSaveState] = useState("idle");
+  const [saveError, setSaveError] = useState("");
   const [data, setData] = useState(makeInitialData);
   const [mo, setMo] = useState("3월");
   const [tab, setTab] = useState("matrix");
@@ -573,6 +641,8 @@ export default function App() {
   const [showNewMonth, setShowNewMonth] = useState(false);
   const [editTarget, setEditTarget] = useState(null); // {crId, ch} for navigating from modal
   const fileRef = useRef(null);
+  const latestSavedRef = useRef("");
+  const saveTimerRef = useRef(null);
 
   const m = data.months[mo];
   const pi = data.monthOrder.indexOf(mo) - 1;
@@ -580,6 +650,102 @@ export default function App() {
 
   const setMonthData = next => {
     setData(prev => ({ ...prev, months: { ...prev.months, [mo]: next } }));
+  };
+
+  useEffect(() => {
+    let mounted = true;
+    supabase.auth.getSession().then(({ data: authData }) => {
+      if (!mounted) return;
+      setSession(authData.session);
+      setAuthLoading(false);
+    });
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+      setRemoteReady(false);
+      setSaveError("");
+      setSaveState("idle");
+      if (!nextSession) {
+        const initial = makeInitialData();
+        setData(initial);
+        setMo(initial.monthOrder[initial.monthOrder.length - 1]);
+        latestSavedRef.current = "";
+      }
+    });
+
+    return () => {
+      mounted = false;
+      listener.subscription?.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!session?.user?.id) return;
+    let cancelled = false;
+
+    const loadDashboard = async () => {
+      setRemoteReady(false);
+      setSaveState("loading");
+      setSaveError("");
+
+      const { data: row, error } = await supabase
+        .from("dashboard_documents")
+        .select("payload")
+        .eq("user_id", session.user.id)
+        .maybeSingle();
+
+      if (cancelled) return;
+      if (error) {
+        setSaveError(error.message);
+        setSaveState("error");
+        setRemoteReady(true);
+        return;
+      }
+
+      const nextData = row?.payload || makeInitialData();
+      setData(nextData);
+      setMo(nextData.monthOrder[nextData.monthOrder.length - 1] || "3월");
+      latestSavedRef.current = row?.payload ? JSON.stringify(nextData) : "";
+      setRemoteReady(true);
+      setSaveState(row?.payload ? "saved" : "idle");
+    };
+
+    loadDashboard();
+    return () => { cancelled = true; };
+  }, [session?.user?.id]);
+
+  useEffect(() => {
+    if (!session?.user?.id || !remoteReady) return;
+    const serialized = JSON.stringify(data);
+    if (serialized === latestSavedRef.current) return;
+
+    window.clearTimeout(saveTimerRef.current);
+    setSaveState("saving");
+    setSaveError("");
+
+    saveTimerRef.current = window.setTimeout(async () => {
+      const { error } = await supabase
+        .from("dashboard_documents")
+        .upsert({
+          user_id: session.user.id,
+          payload: data,
+          updated_at: new Date().toISOString(),
+        }, { onConflict: "user_id" });
+
+      if (error) {
+        setSaveError(error.message);
+        setSaveState("error");
+        return;
+      }
+      latestSavedRef.current = serialized;
+      setSaveState("saved");
+    }, 700);
+
+    return () => window.clearTimeout(saveTimerRef.current);
+  }, [data, remoteReady, session?.user?.id]);
+
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
   };
 
   // CSV export — use data URI (Blob/createObjectURL blocked in sandbox)
@@ -631,6 +797,10 @@ export default function App() {
     }
   }, [editTarget]);
 
+  if (authLoading) return <LoadingScreen label="세션 확인 중..." />;
+  if (!session) return <AuthScreen />;
+  if (!remoteReady) return <LoadingScreen label="대시보드 데이터를 불러오는 중..." />;
+
   return (
     <div style={{ minHeight: "100vh", background: "#f3f4f6", fontFamily: "'Pretendard','Apple SD Gothic Neo',-apple-system,sans-serif", color: "#1a1a1a" }}>
       <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
@@ -640,6 +810,9 @@ export default function App() {
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ fontSize: 15, fontWeight: 800, color: "#111", fontFamily: "'Outfit',sans-serif", letterSpacing: "-0.03em" }}>Tourlinks</span>
           {m && <span style={{ fontSize: 10, color: "#2563eb", background: "#eff6ff", padding: "2px 7px", borderRadius: 4, ...S.mono, fontWeight: 500 }}>{m.theme || mo}</span>}
+          <span style={{ fontSize: 10, color: saveState === "error" ? "#dc2626" : "#777", background: saveState === "error" ? "#fef2f2" : "#f3f4f6", padding: "2px 7px", borderRadius: 4 }}>
+            {saveState === "saving" ? "저장 중" : saveState === "saved" ? "저장됨" : saveState === "error" ? "저장 오류" : "개인 데이터"}
+          </span>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
           {/* Tabs */}
@@ -661,8 +834,18 @@ export default function App() {
             <button onClick={() => fileRef.current?.click()} style={{ ...S.btn, fontSize: 10, background: "#eff6ff", color: "#2563eb", border: "1px solid #bfdbfe" }}>📂 불러오기</button>
             <input ref={fileRef} type="file" accept=".csv" style={{ display: "none" }} onChange={handleImport} />
           </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+            <span style={{ fontSize: 10, color: "#777", maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session.user.email}</span>
+            <button onClick={handleSignOut} style={{ ...S.btn, fontSize: 10, background: "#f3f4f6", color: "#555", border: "1px solid #e5e7eb" }}>로그아웃</button>
+          </div>
         </div>
       </div>
+
+      {saveError && (
+        <div style={{ background: "#fef2f2", borderBottom: "1px solid #fecaca", color: "#991b1b", fontSize: 11, padding: "7px 20px" }}>
+          Supabase 저장 오류: {saveError}
+        </div>
+      )}
 
       {/* Content */}
       {m && (
