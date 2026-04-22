@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useRef } from "react";
 import { supabase } from "./src/lib/supabaseClient";
 
 /* ══════════════════════════════════════════════════════════════
@@ -8,6 +8,8 @@ const fmt = n => (n == null || n === 0) ? "–" : n.toLocaleString("ko-KR");
 const sum = a => a.filter(v => v != null).reduce((s, v) => s + v, 0);
 const uid = () => Math.random().toString(36).slice(2, 8);
 const WEEKS = [0, 1, 2, 3, 4]; // W1-W5
+const MONTHS = Array.from({ length: 12 }, (_, i) => `${i + 1}월`);
+const PROJECT_TABLE = "dashboard_projects";
 
 const FUNNEL_KEYS = [
   { k: "ad", lb: "광고 홍보 진행" },
@@ -19,6 +21,42 @@ const FUNNEL_KEYS = [
 ];
 
 const emptyFunnel = () => ({ ad: 0, uv: 0, entry: 0, detail: 0, inquiry: 0, quote: 0, theme: "" });
+const emptyMonth = () => ({ theme: "", funnel: emptyFunnel(), channels: [], creatives: [], cells: {} });
+
+const normalizeMonth = month => ({
+  ...emptyMonth(),
+  ...month,
+  funnel: { ...emptyFunnel(), ...(month?.funnel || {}) },
+  channels: Array.isArray(month?.channels) ? month.channels : [],
+  creatives: Array.isArray(month?.creatives) ? month.creatives : [],
+  cells: month?.cells && typeof month.cells === "object" ? month.cells : {},
+});
+
+const normalizeDashboardData = input => {
+  const sourceMonths = input?.months || {};
+  const months = {};
+  for (const month of MONTHS) {
+    months[month] = normalizeMonth(sourceMonths[month]);
+  }
+  return { monthOrder: [...MONTHS], months };
+};
+
+const monthHasData = month => {
+  if (!month) return false;
+  if (month.theme) return true;
+  if (month.channels?.length || month.creatives?.length) return true;
+  return FUNNEL_KEYS.some(({ k }) => Number(month.funnel?.[k] || 0) !== 0);
+};
+
+const preferredMonth = data => {
+  const order = data?.monthOrder || MONTHS;
+  for (let i = order.length - 1; i >= 0; i--) {
+    const month = order[i];
+    if (monthHasData(data?.months?.[month])) return month;
+  }
+  const current = `${new Date().getMonth() + 1}월`;
+  return data?.months?.[current] ? current : MONTHS[0];
+};
 
 /* ══════════════════════════════════════════════════════════════
    INITIAL DATA — March 2026 sample
@@ -66,7 +104,7 @@ function makeInitialData() {
     "cr1__SMS": [{ id: "v1", label: "문자발송", img: "https://images.unsplash.com/photo-1535131749006-b7f58c99034b?w=280&h=160&fit=crop", period: "02/11", w: [6262, null, null, null, null] }],
   });
 
-  return { monthOrder: ["2월", "3월"], months };
+  return normalizeDashboardData({ months });
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -149,7 +187,7 @@ function importCSV(text) {
       m.cells[ck].push({ id: vId, label: vLabel, img, period, w });
     }
   }
-  return data;
+  return normalizeDashboardData(data);
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -180,15 +218,16 @@ function WBars({ w, h = 16 }) {
   );
 }
 
-function CellThumb({ versions, onClick }) {
-  if (!versions?.length) return <div style={{ color: "#ddd", fontSize: 11, textAlign: "center", padding: 10 }}>–</div>;
+function CellThumb({ versions, onClick, rowHeight = 82 }) {
+  if (!versions?.length) return <div style={{ color: "#ddd", fontSize: 11, textAlign: "center", minHeight: Math.max(44, rowHeight - 10), display: "grid", placeItems: "center", padding: 10 }}>–</div>;
   const total = versionsTotal(versions);
   const rep = versions[0];
   const aggW = WEEKS.map(wi => versions.reduce((s, v) => s + (v.w[wi] || 0), 0) || null);
+  const imageHeight = Math.max(28, Math.min(82, rowHeight - 42));
 
   return (
-    <div onClick={onClick} style={{ cursor: "pointer", padding: 3 }}>
-      <div style={{ position: "relative", borderRadius: 3, overflow: "hidden", marginBottom: 3, height: 42 }}>
+    <div onClick={onClick} style={{ cursor: "pointer", padding: 3, minHeight: Math.max(44, rowHeight - 10), display: "flex", flexDirection: "column", justifyContent: "center" }}>
+      <div style={{ position: "relative", borderRadius: 3, overflow: "hidden", marginBottom: 3, height: imageHeight }}>
         {rep.img ? (
           <img src={rep.img} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
         ) : (
@@ -505,64 +544,6 @@ function FunnelInputTab({ monthData, setMonthData }) {
   );
 }
 
-/* New Month Modal */
-function NewMonthModal({ data, onClose, onCreate }) {
-  const [name, setName] = useState("");
-  const [importFrom, setImportFrom] = useState("");
-
-  const create = () => {
-    if (!name.trim() || data.months[name.trim()]) return;
-    const n = name.trim();
-    const base = importFrom && data.months[importFrom];
-    const newM = {
-      theme: "",
-      funnel: emptyFunnel(),
-      channels: base ? [...base.channels] : [],
-      creatives: base ? base.creatives.map(c => ({ ...c, id: uid() })) : [],
-      cells: {},
-    };
-    // If importing, copy creative structure (no data)
-    if (base) {
-      for (const cr of base.creatives) {
-        const newCr = newM.creatives.find(nc => nc.name === cr.name);
-        if (!newCr) continue;
-        for (const ch of base.channels) {
-          const vs = base.cells[cellKey(cr.id, ch)];
-          if (vs?.length) {
-            newM.cells[cellKey(newCr.id, ch)] = vs.map(v => ({ id: uid(), label: v.label, img: v.img, period: "", w: [null, null, null, null, null] }));
-          }
-        }
-      }
-    }
-    onCreate(n, newM);
-  };
-
-  return (
-    <div style={{ position: "fixed", inset: 0, zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center" }} onClick={onClose}>
-      <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.2)" }} />
-      <div onClick={e => e.stopPropagation()} style={{ position: "relative", background: "#fff", borderRadius: 12, padding: 24, width: 360, boxShadow: "0 12px 40px rgba(0,0,0,0.1)" }}>
-        <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 14 }}>신규 월 생성</div>
-        <div style={{ marginBottom: 10 }}>
-          <label style={{ fontSize: 10, color: "#888", display: "block", marginBottom: 3 }}>월 이름</label>
-          <input value={name} onChange={e => setName(e.target.value)} style={S.input} placeholder="예: 4월" autoFocus />
-        </div>
-        <div style={{ marginBottom: 14 }}>
-          <label style={{ fontSize: 10, color: "#888", display: "block", marginBottom: 3 }}>채널/소재 구조 가져오기 (선택)</label>
-          <select value={importFrom} onChange={e => setImportFrom(e.target.value)} style={{ ...S.input, padding: "6px 8px" }}>
-            <option value="">새로 시작</option>
-            {data.monthOrder.map(mo => <option key={mo} value={mo}>{mo}</option>)}
-          </select>
-          {importFrom && <div style={{ fontSize: 10, color: "#2563eb", marginTop: 3 }}>채널 목록, 소재 목록, 버전 구조를 복사합니다 (수치는 초기화)</div>}
-        </div>
-        <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
-          <button onClick={onClose} style={{ ...S.btn, background: "#f3f4f6", color: "#666" }}>취소</button>
-          <button onClick={create} style={{ ...S.btn, ...S.btnPrimary }} disabled={!name.trim()}>생성</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function AuthScreen() {
   const [mode, setMode] = useState("signin");
   const [email, setEmail] = useState("");
@@ -635,10 +616,16 @@ export default function App() {
   const [saveState, setSaveState] = useState("idle");
   const [saveError, setSaveError] = useState("");
   const [data, setData] = useState(makeInitialData);
-  const [mo, setMo] = useState("3월");
+  const [mo, setMo] = useState(() => preferredMonth(makeInitialData()));
+  const [projects, setProjects] = useState([]);
+  const [projectId, setProjectId] = useState("");
+  const [newProjectName, setNewProjectName] = useState("");
+  const [projectBusy, setProjectBusy] = useState(false);
+  const [showRowTotals, setShowRowTotals] = useState(true);
+  const [showColumnTotals, setShowColumnTotals] = useState(true);
+  const [rowHeight, setRowHeight] = useState(82);
   const [tab, setTab] = useState("matrix");
   const [detail, setDetail] = useState(null);
-  const [showNewMonth, setShowNewMonth] = useState(false);
   const [editTarget, setEditTarget] = useState(null); // {crId, ch} for navigating from modal
   const fileRef = useRef(null);
   const latestSavedRef = useRef("");
@@ -650,6 +637,133 @@ export default function App() {
 
   const setMonthData = next => {
     setData(prev => ({ ...prev, months: { ...prev.months, [mo]: next } }));
+  };
+
+  const persistProject = async (targetProjectId, payload) => {
+    const { error } = await supabase
+      .from(PROJECT_TABLE)
+      .update({
+        payload,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", targetProjectId)
+      .eq("user_id", session.user.id);
+
+    if (error) throw error;
+  };
+
+  const flushCurrentProject = async () => {
+    if (!projectId || !remoteReady) return;
+    const serialized = JSON.stringify(data);
+    if (serialized === latestSavedRef.current) return;
+
+    window.clearTimeout(saveTimerRef.current);
+    setSaveState("saving");
+    await persistProject(projectId, data);
+    latestSavedRef.current = serialized;
+    setProjects(prev => prev.map(project => project.id === projectId ? { ...project, payload: data, updated_at: new Date().toISOString() } : project));
+    setSaveState("saved");
+  };
+
+  const handleProjectSelect = async e => {
+    const nextProjectId = e.target.value;
+    if (nextProjectId === projectId) return;
+    const selected = projects.find(project => project.id === nextProjectId);
+    if (!selected) return;
+
+    setProjectBusy(true);
+    setSaveError("");
+    try {
+      await flushCurrentProject();
+      const nextData = normalizeDashboardData(selected.payload);
+      setProjectId(selected.id);
+      setData(nextData);
+      setMo(prev => nextData.months[prev] ? prev : preferredMonth(nextData));
+      latestSavedRef.current = JSON.stringify(nextData);
+      setSaveState("saved");
+    } catch (err) {
+      setSaveError(err.message);
+      setSaveState("error");
+    } finally {
+      setProjectBusy(false);
+    }
+  };
+
+  const handleCreateProject = async () => {
+    const name = newProjectName.trim() || `프로젝트 ${projects.length + 1}`;
+    setProjectBusy(true);
+    setSaveError("");
+
+    try {
+      await flushCurrentProject();
+      const payload = makeInitialData();
+      const { data: row, error } = await supabase
+        .from(PROJECT_TABLE)
+        .insert({ user_id: session.user.id, name, payload })
+        .select("id,name,payload,updated_at")
+        .single();
+
+      if (error) throw error;
+      const created = { ...row, payload: normalizeDashboardData(row.payload) };
+      setProjects(prev => [created, ...prev]);
+      setProjectId(created.id);
+      setData(created.payload);
+      setMo(preferredMonth(created.payload));
+      latestSavedRef.current = JSON.stringify(created.payload);
+      setNewProjectName("");
+      setSaveState("saved");
+    } catch (err) {
+      setSaveError(err.message);
+      setSaveState("error");
+    } finally {
+      setProjectBusy(false);
+    }
+  };
+
+  const handleDeleteProject = async () => {
+    const selected = projects.find(project => project.id === projectId);
+    if (!selected || !window.confirm(`"${selected.name}" 프로젝트를 삭제하시겠습니까?`)) return;
+
+    setProjectBusy(true);
+    setSaveError("");
+    window.clearTimeout(saveTimerRef.current);
+
+    try {
+      const { error } = await supabase
+        .from(PROJECT_TABLE)
+        .delete()
+        .eq("id", selected.id)
+        .eq("user_id", session.user.id);
+
+      if (error) throw error;
+
+      let remaining = projects.filter(project => project.id !== selected.id);
+      if (remaining.length === 0) {
+        const payload = makeInitialData();
+        const { data: row, error: createError } = await supabase
+          .from(PROJECT_TABLE)
+          .insert({ user_id: session.user.id, name: "기본 프로젝트", payload })
+          .select("id,name,payload,updated_at")
+          .single();
+
+        if (createError) throw createError;
+        remaining = [{ ...row, payload: normalizeDashboardData(row.payload) }];
+      }
+
+      const nextProject = remaining[0];
+      const nextData = normalizeDashboardData(nextProject.payload);
+      setProjects(remaining);
+      setProjectId(nextProject.id);
+      setData(nextData);
+      setMo(preferredMonth(nextData));
+      latestSavedRef.current = JSON.stringify(nextData);
+      setSaveState("saved");
+    } catch (err) {
+      setSaveError(err.message);
+      setSaveState("error");
+    } finally {
+      setProjectBusy(false);
+    }
   };
 
   useEffect(() => {
@@ -667,8 +781,10 @@ export default function App() {
       setSaveState("idle");
       if (!nextSession) {
         const initial = makeInitialData();
+        setProjects([]);
+        setProjectId("");
         setData(initial);
-        setMo(initial.monthOrder[initial.monthOrder.length - 1]);
+        setMo(preferredMonth(initial));
         latestSavedRef.current = "";
       }
     });
@@ -683,16 +799,28 @@ export default function App() {
     if (!session?.user?.id) return;
     let cancelled = false;
 
-    const loadDashboard = async () => {
+    const createInitialProject = async (name = "기본 프로젝트") => {
+      const payload = makeInitialData();
+      const { data: row, error } = await supabase
+        .from(PROJECT_TABLE)
+        .insert({ user_id: session.user.id, name, payload })
+        .select("id,name,payload,updated_at")
+        .single();
+
+      if (error) throw error;
+      return { ...row, payload: normalizeDashboardData(row.payload) };
+    };
+
+    const loadProjects = async () => {
       setRemoteReady(false);
       setSaveState("loading");
       setSaveError("");
 
-      const { data: row, error } = await supabase
-        .from("dashboard_documents")
-        .select("payload")
+      const { data: rows, error } = await supabase
+        .from(PROJECT_TABLE)
+        .select("id,name,payload,updated_at")
         .eq("user_id", session.user.id)
-        .maybeSingle();
+        .order("updated_at", { ascending: false });
 
       if (cancelled) return;
       if (error) {
@@ -702,20 +830,36 @@ export default function App() {
         return;
       }
 
-      const nextData = row?.payload || makeInitialData();
+      let nextProjects = (rows || []).map(row => ({ ...row, payload: normalizeDashboardData(row.payload) }));
+      if (nextProjects.length === 0) {
+        try {
+          nextProjects = [await createInitialProject()];
+        } catch (err) {
+          if (cancelled) return;
+          setSaveError(err.message);
+          setSaveState("error");
+          setRemoteReady(true);
+          return;
+        }
+      }
+
+      const selected = nextProjects[0];
+      const nextData = normalizeDashboardData(selected.payload);
+      setProjects(nextProjects);
+      setProjectId(selected.id);
       setData(nextData);
-      setMo(nextData.monthOrder[nextData.monthOrder.length - 1] || "3월");
-      latestSavedRef.current = row?.payload ? JSON.stringify(nextData) : "";
+      setMo(preferredMonth(nextData));
+      latestSavedRef.current = JSON.stringify(nextData);
       setRemoteReady(true);
-      setSaveState(row?.payload ? "saved" : "idle");
+      setSaveState("saved");
     };
 
-    loadDashboard();
+    loadProjects();
     return () => { cancelled = true; };
   }, [session?.user?.id]);
 
   useEffect(() => {
-    if (!session?.user?.id || !remoteReady) return;
+    if (!session?.user?.id || !projectId || !remoteReady) return;
     const serialized = JSON.stringify(data);
     if (serialized === latestSavedRef.current) return;
 
@@ -725,12 +869,13 @@ export default function App() {
 
     saveTimerRef.current = window.setTimeout(async () => {
       const { error } = await supabase
-        .from("dashboard_documents")
-        .upsert({
-          user_id: session.user.id,
+        .from(PROJECT_TABLE)
+        .update({
           payload: data,
           updated_at: new Date().toISOString(),
-        }, { onConflict: "user_id" });
+        })
+        .eq("id", projectId)
+        .eq("user_id", session.user.id);
 
       if (error) {
         setSaveError(error.message);
@@ -738,11 +883,12 @@ export default function App() {
         return;
       }
       latestSavedRef.current = serialized;
+      setProjects(prev => prev.map(project => project.id === projectId ? { ...project, payload: data, updated_at: new Date().toISOString() } : project));
       setSaveState("saved");
     }, 700);
 
     return () => window.clearTimeout(saveTimerRef.current);
-  }, [data, remoteReady, session?.user?.id]);
+  }, [data, projectId, remoteReady, session?.user?.id]);
 
   const handleSignOut = async () => {
     await supabase.auth.signOut();
@@ -779,7 +925,7 @@ export default function App() {
       const result = importCSV(ev.target.result);
       if (result && result.monthOrder.length) {
         setData(result);
-        setMo(result.monthOrder[result.monthOrder.length - 1]);
+        setMo(preferredMonth(result));
         setTab("matrix");
       } else {
         console.error("CSV import failed: invalid format");
@@ -809,6 +955,14 @@ export default function App() {
       <div style={{ padding: "10px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", background: "#fff", borderBottom: "1px solid #e5e7eb", flexWrap: "wrap", gap: 8 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ fontSize: 15, fontWeight: 800, color: "#111", fontFamily: "'Outfit',sans-serif", letterSpacing: "-0.03em" }}>Tourlinks</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 4, background: "#f3f4f6", borderRadius: 6, padding: 2 }}>
+            <select value={projectId} onChange={handleProjectSelect} disabled={projectBusy} style={{ height: 24, minWidth: 140, maxWidth: 220, border: "none", borderRadius: 4, background: "#fff", color: "#111", fontSize: 11, fontWeight: 600, padding: "0 6px", outline: "none" }}>
+              {projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
+            </select>
+            <input value={newProjectName} onChange={e => setNewProjectName(e.target.value)} onKeyDown={e => { if (e.key === "Enter") handleCreateProject(); }} disabled={projectBusy} placeholder="새 프로젝트" style={{ height: 24, width: 96, border: "1px solid #e5e7eb", borderRadius: 4, background: "#fff", color: "#333", fontSize: 10, padding: "0 7px", outline: "none" }} />
+            <button onClick={handleCreateProject} disabled={projectBusy} style={{ ...S.btn, fontSize: 9, ...S.btnPrimary, padding: "4px 7px", height: 24 }}>생성</button>
+            <button onClick={handleDeleteProject} disabled={projectBusy || !projectId} style={{ ...S.btn, fontSize: 9, ...S.btnDanger, padding: "4px 7px", height: 24 }}>삭제</button>
+          </div>
           {m && <span style={{ fontSize: 10, color: "#2563eb", background: "#eff6ff", padding: "2px 7px", borderRadius: 4, ...S.mono, fontWeight: 500 }}>{m.theme || mo}</span>}
           <span style={{ fontSize: 10, color: saveState === "error" ? "#dc2626" : "#777", background: saveState === "error" ? "#fef2f2" : "#f3f4f6", padding: "2px 7px", borderRadius: 4 }}>
             {saveState === "saving" ? "저장 중" : saveState === "saved" ? "저장됨" : saveState === "error" ? "저장 오류" : "개인 데이터"}
@@ -826,7 +980,21 @@ export default function App() {
             {data.monthOrder.map(m2 => (
               <button key={m2} onClick={() => setMo(m2)} style={{ padding: "4px 9px", fontSize: 10, border: "none", borderRadius: 4, cursor: "pointer", ...S.mono, background: m2 === mo ? "#fff" : "transparent", color: m2 === mo ? "#2563eb" : "#999", fontWeight: m2 === mo ? 700 : 400, boxShadow: m2 === mo ? "0 1px 2px rgba(0,0,0,0.06)" : "none" }}>{m2}</button>
             ))}
-            <button onClick={() => setShowNewMonth(true)} style={{ ...S.btn, fontSize: 9, ...S.btnPrimary, padding: "3px 7px" }}>+ 월</button>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, background: "#f3f4f6", borderRadius: 6, padding: "3px 6px" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 10, color: "#555", cursor: "pointer", whiteSpace: "nowrap" }}>
+              <input type="checkbox" checked={showRowTotals} onChange={e => setShowRowTotals(e.target.checked)} style={{ width: 12, height: 12, margin: 0 }} />
+              행 합계
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 10, color: "#555", cursor: "pointer", whiteSpace: "nowrap" }}>
+              <input type="checkbox" checked={showColumnTotals} onChange={e => setShowColumnTotals(e.target.checked)} style={{ width: 12, height: 12, margin: 0 }} />
+              열 합계
+            </label>
+            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <span style={{ fontSize: 10, color: "#777", whiteSpace: "nowrap" }}>행 높이</span>
+              <input type="range" min="62" max="132" step="2" value={rowHeight} onChange={e => setRowHeight(Number(e.target.value))} style={{ width: 78 }} />
+              <span style={{ fontSize: 9, color: "#999", ...S.mono, width: 28 }}>{rowHeight}px</span>
+            </div>
           </div>
           {/* Save/Load */}
           <div style={{ display: "flex", gap: 3 }}>
@@ -861,34 +1029,36 @@ export default function App() {
                       {m.channels.map(ch => (
                         <th key={ch} style={{ padding: "8px 6px", textAlign: "center", fontSize: 10, fontWeight: 600, color: "#888", borderBottom: "2px solid #e5e7eb", borderRight: "1px solid #eee", minWidth: 110 }}>{ch}</th>
                       ))}
-                      <th style={{ width: 70, padding: "8px 10px", textAlign: "right", fontSize: 10, fontWeight: 700, color: "#555", borderBottom: "2px solid #e5e7eb", background: "#f7f8fa" }}>합계</th>
+                      {showRowTotals && <th style={{ width: 70, padding: "8px 10px", textAlign: "right", fontSize: 10, fontWeight: 700, color: "#555", borderBottom: "2px solid #e5e7eb", background: "#f7f8fa" }}>합계</th>}
                     </tr>
                   </thead>
                   <tbody>
                     {m.creatives.map(cr => (
-                      <tr key={cr.id}>
-                        <td style={{ padding: "8px 10px", borderBottom: "1px solid #f0f0f0", borderRight: "1px solid #eee", verticalAlign: "top", position: "sticky", left: 0, background: "#fff", zIndex: 1 }}>
+                      <tr key={cr.id} style={{ height: rowHeight }}>
+                        <td style={{ padding: "8px 10px", borderBottom: "1px solid #f0f0f0", borderRight: "1px solid #eee", verticalAlign: "middle", position: "sticky", left: 0, background: "#fff", zIndex: 1 }}>
                           <div style={{ fontSize: 11, fontWeight: 600, color: "#222" }}>{cr.name}</div>
                           <div style={{ fontSize: 9, color: "#bbb", marginTop: 1 }}>{m.channels.filter(ch => (m.cells[cellKey(cr.id, ch)] || []).length).length}ch</div>
                         </td>
                         {m.channels.map(ch => {
                           const vs = m.cells[cellKey(cr.id, ch)] || [];
                           return (
-                            <td key={ch} style={{ padding: 3, borderBottom: "1px solid #f0f0f0", borderRight: "1px solid #eee", verticalAlign: "top" }}>
-                              <CellThumb versions={vs} onClick={() => vs.length ? setDetail({ crName: cr.name, crId: cr.id, ch, versions: vs }) : null} />
+                            <td key={ch} style={{ padding: 3, borderBottom: "1px solid #f0f0f0", borderRight: "1px solid #eee", verticalAlign: "middle" }}>
+                              <CellThumb versions={vs} rowHeight={rowHeight} onClick={() => vs.length ? setDetail({ crName: cr.name, crId: cr.id, ch, versions: vs }) : null} />
                             </td>
                           );
                         })}
-                        <td style={{ padding: "8px 10px", textAlign: "right", borderBottom: "1px solid #f0f0f0", fontSize: 12, fontWeight: 700, color: "#111", ...S.mono, background: "#f7f8fa", verticalAlign: "middle" }}>{fmt(crTotalInMonth(m, cr.id))}</td>
+                        {showRowTotals && <td style={{ padding: "8px 10px", textAlign: "right", borderBottom: "1px solid #f0f0f0", fontSize: 12, fontWeight: 700, color: "#111", ...S.mono, background: "#f7f8fa", verticalAlign: "middle" }}>{fmt(crTotalInMonth(m, cr.id))}</td>}
                       </tr>
                     ))}
-                    <tr style={{ background: "#f7f8fa" }}>
-                      <td style={{ padding: "8px 10px", fontWeight: 700, fontSize: 10, color: "#555", borderTop: "2px solid #e5e7eb", borderRight: "1px solid #eee", position: "sticky", left: 0, background: "#f7f8fa", zIndex: 1 }}>채널별 합계</td>
-                      {m.channels.map(ch => (
-                        <td key={ch} style={{ padding: "8px 4px", textAlign: "center", borderTop: "2px solid #e5e7eb", borderRight: "1px solid #eee", fontSize: 11, fontWeight: 700, color: "#111", ...S.mono }}>{chTotalInMonth(m, ch) > 0 ? fmt(chTotalInMonth(m, ch)) : "–"}</td>
-                      ))}
-                      <td style={{ padding: "8px 10px", textAlign: "right", borderTop: "2px solid #e5e7eb", fontSize: 13, fontWeight: 800, color: "#2563eb", ...S.mono, background: "#eff6ff" }}>{fmt(monthGrandTotal(m))}</td>
-                    </tr>
+                    {showColumnTotals && (
+                      <tr style={{ background: "#f7f8fa" }}>
+                        <td style={{ padding: "8px 10px", fontWeight: 700, fontSize: 10, color: "#555", borderTop: "2px solid #e5e7eb", borderRight: "1px solid #eee", position: "sticky", left: 0, background: "#f7f8fa", zIndex: 1 }}>채널별 합계</td>
+                        {m.channels.map(ch => (
+                          <td key={ch} style={{ padding: "8px 4px", textAlign: "center", borderTop: "2px solid #e5e7eb", borderRight: "1px solid #eee", fontSize: 11, fontWeight: 700, color: "#111", ...S.mono }}>{chTotalInMonth(m, ch) > 0 ? fmt(chTotalInMonth(m, ch)) : "–"}</td>
+                        ))}
+                        {showRowTotals && <td style={{ padding: "8px 10px", textAlign: "right", borderTop: "2px solid #e5e7eb", fontSize: 13, fontWeight: 800, color: "#2563eb", ...S.mono, background: "#eff6ff" }}>{fmt(monthGrandTotal(m))}</td>}
+                      </tr>
+                    )}
                   </tbody>
                 </table>
               </div>
@@ -926,21 +1096,6 @@ export default function App() {
         />
       )}
 
-      {/* New month modal */}
-      {showNewMonth && (
-        <NewMonthModal
-          data={data}
-          onClose={() => setShowNewMonth(false)}
-          onCreate={(name, newMonth) => {
-            setData(prev => ({
-              monthOrder: [...prev.monthOrder, name],
-              months: { ...prev.months, [name]: newMonth },
-            }));
-            setMo(name);
-            setShowNewMonth(false);
-          }}
-        />
-      )}
     </div>
   );
 }
