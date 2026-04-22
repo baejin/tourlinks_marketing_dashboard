@@ -41,6 +41,8 @@ const normalizeDashboardData = input => {
   return { monthOrder: [...MONTHS], months };
 };
 
+const makeEmptyData = () => normalizeDashboardData({ months: {} });
+
 const monthHasData = month => {
   if (!month) return false;
   if (month.theme) return true;
@@ -696,7 +698,7 @@ export default function App() {
 
     try {
       await flushCurrentProject();
-      const payload = makeInitialData();
+      const payload = makeEmptyData();
       const { data: row, error } = await supabase
         .from(PROJECT_TABLE)
         .insert({ user_id: session.user.id, name, payload })
